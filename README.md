@@ -39,9 +39,11 @@ All provider files will be retained in their original form with acquisition date
 
 ## What this repository currently contains
 
-The first implemented component is [`scripts/meteoswiss_download.py`](scripts/meteoswiss_download.py). It discovers provider-published assets in three MeteoSwiss collections (`ogd-nime`, `ogd-smn`, `ogd-smn-precip`) and retrieves available station metadata, daily files and monthly files. It retains original bytes, checks file integrity and basic structure, and records acquisition outcomes so interrupted runs can be examined and resumed.
+[`scripts/meteoswiss_download.py`](scripts/meteoswiss_download.py) discovers provider-published assets in three MeteoSwiss collections (`ogd-nime`, `ogd-smn`, `ogd-smn-precip`) and retrieves available station metadata, daily files and monthly files. It retains original bytes, checks file integrity and basic structure, and records acquisition outcomes so interrupted runs can be examined and resumed.
 
-Acquisition checks establish transfer integrity, **not scientific validity**. The script does not select catchments, assess precipitation quality, homogenize observations, run IH-GAR or perform water-balance analysis. Acquisition from Canton Ticino, WSL and Agrometeo and the later scientific stages remain planned work and will be described as completed only after implementation and verification.
+[`scripts/agrometeo_download.py`](scripts/agrometeo_download.py) archives expanded public station metadata, the meteorological station selector and sensor definitions, then requests **measured-only daily and monthly precipitation** for their union of station IDs. It retains original JSON responses, produces station CSVs with source references, flags metadata disagreements and reports structural coverage. Other currently station-linked variables can be requested with `--all-sensors`. Both scripts use Python 3.10+ and the standard library. See the [Agrometeo acquisition guide](docs/agrometeo_acquisition.md) for commands, folders, resume behavior and limitations.
+
+Acquisition checks establish transfer integrity, **not scientific validity**. Neither script selects catchments, homogenizes observations, runs IH-GAR or performs water-balance analysis. Agrometeo's public catalogues do not establish completeness of retired stations or past instrument metadata. Daily accumulation windows and comparability with MeteoSwiss require separate verification. Acquisition from Canton Ticino and WSL and the later scientific stages remain planned work and will be described as completed only after implementation and verification.
 
 ## Expected research outputs
 
