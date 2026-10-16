@@ -22,6 +22,7 @@ The core study area consists of Swiss catchments relevant to flows toward northe
 | Canton Ticino | Additional cantonal station histories and observations, subject to access and parameter suitability. |
 | WSL | Complementary records where the measured precipitation quantity and siting are appropriate for this analysis. |
 | Agrometeo | Additional agricultural-network observations, conditional on temporal coverage, instrumentation and comparability. |
+| SUPSI/IST Ticino hydrological yearbook | Cantonal precipitation station sheets and station-year daily/monthly PDF tables; reconcile station histories and printed symbols before use. |
 
 All provider files will be retained in their original form with acquisition dates and source information. Network membership does not by itself establish that records are comparable or usable for climate analysis.
 
@@ -43,7 +44,17 @@ All provider files will be retained in their original form with acquisition date
 
 [`scripts/agrometeo_download.py`](scripts/agrometeo_download.py) archives expanded public station metadata, the meteorological station selector and sensor definitions, then requests **measured-only daily and monthly precipitation** for their union of station IDs. It retains original JSON responses, produces station CSVs with source references, flags metadata disagreements and reports structural coverage. Other currently station-linked variables can be requested with `--all-sensors`. Both scripts use Python 3.10+ and the standard library. See the [Agrometeo acquisition guide](docs/agrometeo_acquisition.md) for commands, folders, resume behavior and limitations.
 
-Acquisition checks establish transfer integrity, **not scientific validity**. Neither script selects catchments, homogenizes observations, runs IH-GAR or performs water-balance analysis. Agrometeo's public catalogues do not establish completeness of retired stations or past instrument metadata. Daily accumulation windows and comparability with MeteoSwiss require separate verification. Acquisition from Canton Ticino and WSL and the later scientific stages remain planned work and will be described as completed only after implementation and verification.
+[`scripts/supsi_download.py`](scripts/supsi_download.py) archives the SUPSI/IST precipitation catalogue, WGS84 and LV95 location files, station sheets and available station-year rain PDFs. It keeps original files with checksums, an availability plan and per-request reports. The default range ends in 2023 to match the thesis baseline; PDF transcription is a later stage. See the [SUPSI acquisition guide](docs/supsi_acquisition.md) for commands and source-specific caveats.
+
+[`scripts/supsi_extract.py`](scripts/supsi_extract.py) transcribes the SUPSI PDF daily cells and printed monthly totals into source-linked CSVs after acquisition. It keeps dashes and printed suffixes unresolved and reports layout, arithmetic and partial-period issues. It requires `pdfplumber`; see the [SUPSI extraction guide](docs/supsi_extraction.md). These transcriptions are not quality-controlled precipitation series.
+
+[`scripts/supsi_organize_validate.py`](scripts/supsi_organize_validate.py) independently checks the PDF cells and exports station-specific daily, monthly and catalogue tables. [`scripts/supsi_combine_stations.py`](scripts/supsi_combine_stations.py) builds all-station tables while preserving the current-catalogue scope of its location fields. [`scripts/supsi_site_history.py`](scripts/supsi_site_history.py) adds each archived yearbook's printed coordinates and altitude to date-specific observation views, keeping a separate current catalogue snapshot and explicitly flagging the Chiasso–Novazzano series transition. See the [station organization](docs/supsi_station_organization.md), [combined tables](docs/supsi_combined.md) and [site history/QGIS](docs/supsi_site_history.md) guides. None of these joins establishes physical relocation dates or precipitation quality.
+
+[`scripts/wsl_lwf_download.py`](scripts/wsl_lwf_download.py) archives the publicly published WSL LWF meteorology station CSVs on EnviDat with dataset metadata, checksums and a station-file inventory. These are hourly historical snapshots, and the public LWF catalogue does not represent every WSL station. See the [WSL LWF acquisition guide](docs/wsl_lwf_acquisition.md).
+
+[`scripts/wsl_lwf_screen.py`](scripts/wsl_lwf_screen.py) verifies the archived WSL LWF station files and reports annual coverage, missing cells and timestamp anomalies without calculating daily rainfall. See the [WSL LWF screening guide](docs/wsl_lwf_screening.md).
+
+Acquisition and transcription checks establish transfer integrity and basic PDF arithmetic, **not scientific validity**. The scripts do not select catchments, homogenize observations, run IH-GAR or perform water-balance analysis. Agrometeo's public catalogues do not establish completeness of retired stations or past instrument metadata. Daily accumulation windows and comparability across providers require separate verification. Other Canton Ticino sources, additional WSL archives and the later scientific stages remain planned work and will be described as completed only after implementation and verification.
 
 ## Expected research outputs
 
