@@ -1,5 +1,6 @@
 """Small offline checks of SUPSI catalogue and preservation rules."""
 import csv
+from contextlib import closing
 import io
 import json
 import sqlite3
@@ -81,7 +82,9 @@ class CatalogueTests(unittest.TestCase):
                 pass
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            with sqlite3.connect(root / "cache.sqlite3") as db:
+            # sqlite3.Connection's context manager commits but does not close it.
+            # Close explicitly so TemporaryDirectory can unlink the file on Windows.
+            with closing(sqlite3.connect(root / "cache.sqlite3")) as db:
                 archive = sup.Archive(root, db, 0, 1, 0, False)
                 with patch.object(sup.urllib.request, "urlopen", return_value=Response(url)) as request:
                     first, _ = archive.fetch("yearbook", url, "P_JOIN", 2023)
