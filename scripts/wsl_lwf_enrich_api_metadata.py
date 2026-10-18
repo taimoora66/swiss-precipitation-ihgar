@@ -2,7 +2,7 @@
 """Add sourced historical WSL station metadata to the existing API-only XLSX.
 
 No precipitation data are read from PANGAEA or the archived WSL product. The
-existing API-only daily sheet is copied byte-for-byte into a new workbook.
+existing API-only hourly/daily and monthly sheets are copied byte-for-byte.
 """
 
 import argparse
@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import uuid
 import xml.etree.ElementTree as ET
@@ -59,6 +60,14 @@ EXTRA = (
 def file_hash(path):
     digest = sha256()
     with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def entry_hash(archive, name):
+    digest = sha256()
+    with archive.open(name) as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
@@ -142,8 +151,14 @@ def main(argv=None):
 
     with ZipFile(source) as z:
         base.require(z.testzip() is None, "Source workbook ZIP failed integrity check")
+        base.require(set(pointer.get("sheets", {})) ==
+                     {"Station_metadata", "Hourly_daily_grid", "Daily_month_grid"},
+                     "Rerun the three-sheet API exporter before enriching metadata")
         original_meta = read_metadata_sheet(z.read("xl/worksheets/sheet1.xml"))
-        original_grid_xml = z.read("xl/worksheets/sheet2.xml")
+        original_precip_hashes = {
+            name: entry_hash(z, name) for name in
+            ("xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml")
+        }
     new_meta = enrich(original_meta)
     headers = base.META_HEADERS + EXTRA
     rows = [tuple(r.get(k, "") for k in headers) for r in new_meta]
@@ -156,14 +171,17 @@ def main(argv=None):
     destination = folder / "WSL_LWF_API_Only_Selected_All_Metadata_Enriched.xlsx"
     with ZipFile(source) as original, ZipFile(destination, "w") as updated:
         for info in original.infolist():
-            contents = (changed_sheet_xml if info.filename == "xl/worksheets/sheet1.xml"
-                        else original.read(info))
-            updated.writestr(info, contents)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                updated.writestr(info, changed_sheet_xml)
+            else:
+                with original.open(info) as inp, updated.open(info, "w", force_zip64=True) as out:
+                    shutil.copyfileobj(inp, out, length=1024 * 1024)
 
     with ZipFile(destination) as check:
         base.require(check.testzip() is None, "Enriched workbook ZIP failed integrity check")
-        base.require(check.read("xl/worksheets/sheet2.xml") == original_grid_xml,
-                     "Daily precipitation XML changed while adding metadata")
+        base.require({name: entry_hash(check, name) for name in original_precip_hashes} ==
+                     original_precip_hashes,
+                     "Hourly/daily or monthly precipitation XML changed while adding metadata")
         verified = read_metadata_sheet_enriched(check.read("xl/worksheets/sheet1.xml"), headers)
         base.require(verified == new_meta, "Enriched metadata cells differ after saving")
         base.require(sha256(check.read("xl/worksheets/sheet1.xml")).hexdigest() == sha256(changed_sheet_xml).hexdigest(),
@@ -184,8 +202,8 @@ def main(argv=None):
         "metadata_origin": "station_specific_PANGAEA_2016_events_plus_2018_network_equipment_and_WSL_official_program",
         "post2016_station_location_verified": False,
         "current_instrument_verified": False,
-        "precipitation_sheet_xml_sha256": sha256(original_grid_xml).hexdigest(),
-        "precipitation_sheet_byte_identical_to_input": True,
+        "precipitation_sheet_xml_sha256": original_precip_hashes,
+        "precipitation_sheets_byte_identical_to_input": True,
         "metadata_cell_digest": digest,
         "input_workbook": str(source), "input_workbook_sha256": pointer["workbook_sha256"],
         "workbook": str(destination), "workbook_sha256": file_hash(destination),
@@ -197,7 +215,7 @@ def main(argv=None):
     part = target_root / "latest.json.part"
     part.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     os.replace(part, target_root / "latest.json")
-    print(f"Enriched 13 API model metadata rows; daily sheet is byte-for-byte unchanged: {destination}")
+    print(f"Enriched 13 API model metadata rows; hourly/daily and monthly sheets unchanged: {destination}")
     return 0
 
 

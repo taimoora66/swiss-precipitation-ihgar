@@ -55,10 +55,11 @@ match the rain gauge. Longitudes and latitudes use EPSG:4326 degrees.
 
 ## Run in Windows PowerShell
 
-Save `wsl_lwf_enrich_api_metadata.py` beside `wsl_lwf_api_excel.py` (or its
-corrected `wsl_lwf_api_excel_v2.py` replacement) in the
-project's `scripts` folder. The completed API-only workbook must still be
-pointed to by `working/wsl_lwf/api_only_excel/latest.json`.
+Save `wsl_lwf_enrich_api_metadata.py` beside the revised
+`wsl_lwf_api_excel.py` in the project's `scripts` folder. Rerun the API-only
+exporter first to make the three-sheet hourly/daily/monthly workbook. The
+completed workbook must be pointed to by
+`working/wsl_lwf/api_only_excel/latest.json`.
 
 ```powershell
 Set-Location 'C:\Users\Admin\Documents\Swiss_Precipitation_Thesis'
@@ -68,7 +69,7 @@ if ($LASTEXITCODE -ne 0) { throw 'WSL metadata enrichment failed' }
 $enriched = Get-Content '.\working\wsl_lwf\api_only_excel\metadata_enriched\latest.json' -Raw |
     ConvertFrom-Json
 $enriched | Select-Object status, station_count,
-    precipitation_sheet_byte_identical_to_input, workbook, qgis_metadata_csv |
+    precipitation_sheets_byte_identical_to_input, workbook, qgis_metadata_csv |
     Format-List
 Invoke-Item $enriched.workbook
 ```
@@ -77,8 +78,9 @@ Output is under
 `working/wsl_lwf/api_only_excel/metadata_enriched/20261017T122441Z/<timestamp>`:
 the new workbook, a 13-row semicolon-delimited `Station_metadata_QGIS.csv`,
 and `summary.json`. The original API-only workbook and its `latest.json` stay
-unchanged. The enriched workbook has the same two sheets; the entire
-`Daily_month_grid` OOXML is copied byte-for-byte. The script verifies the
+unchanged. The enriched workbook has the same three sheets; the entire
+`Hourly_daily_grid` and `Daily_month_grid` OOXML is copied byte-for-byte.
+The script verifies the
 source workbook hash, the set of 13 station IDs and saved metadata values.
 
 For QGIS, import the metadata CSV with X=`longitude`, Y=`latitude`, CRS

@@ -22,7 +22,8 @@ if ($LASTEXITCODE -ne 0) { throw 'WSL API-only export failed' }
 
 $api = Get-Content '.\working\wsl_lwf\api_only_excel\latest.json' -Raw |
     ConvertFrom-Json
-$api | Select-Object status,station_count,source_year_files,monthly_grid_rows,workbook |
+$api | Select-Object status,station_count,source_year_files,
+    hourly_daily_grid_rows,monthly_grid_rows,workbook |
     Format-List
 Invoke-Item $api.workbook
 ```
@@ -55,8 +56,19 @@ precipitation fields, SHA-256 provenance, observed numeric span, hour counts,
 and the API metadata URL. Do not substitute dataset-level coordinates for
 physical gauge coordinates.
 
+`Hourly_daily_grid` has one row per station and UTC date. `H00`–`H23`
+are the numeric hourly source values at the corresponding **UTC timestamp
+labels**, from 00:00 through 23:00. They are not statements that the gauges
+accumulate exactly from the start to the end of each named hour; the provider's
+observation window still needs confirmation. A blank H cell means there is no
+single usable hourly value for that label, not zero rain. The `valid_hourly_slots`,
+`missing_hourly_slots`, duplicate, ambiguous, and off-hour columns make the
+daily count and exclusions explicit. `computed_complete_day_total_mm` is
+populated only for a complete 24-hour day; the partial amount is diagnostic.
+
 `Daily_month_grid` has one row per station and calendar month from the API's
-first to last hourly metadata dates. D01–D31 hold a provisional amount only
+first to last hourly metadata dates. D01–D31 are **daily totals**, not hourly
+values. They hold a provisional amount only
 when all 24 UTC clock-hour labels for that day have one finite nonnegative
 hourly value. The script uses `precipitation_60` or
 `precipitation_60_multi`, whichever is the sole numeric hourly field on a
@@ -67,6 +79,12 @@ hourly fields on off-hour labels, including timestamps with nonzero seconds,
 also block a complete-day amount. Subminute rows containing only 10-minute
 fields are ignored for this hourly aggregation. The source
 rows stay unchanged and available in the saved yearly CSVs.
+
+The three sheets are ordered `Station_metadata`, `Hourly_daily_grid`,
+`Daily_month_grid`. Both data sheets include the verified source CSV path and
+SHA-256, UTC dates, completeness counts, and explicit aggregation status.
+The metadata enrichment step must be rerun after creating this revised workbook;
+an earlier two-sheet export is retained as a historical output.
 
 `computed_complete_month_total_mm` is populated only if every calendar day
 has a complete 24-hour provisional amount. Otherwise it is blank.

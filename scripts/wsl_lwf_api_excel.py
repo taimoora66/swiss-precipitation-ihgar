@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a two-sheet, API-only WSL LWF precipitation workbook.
+"""Build an hourly, daily and monthly API-only WSL LWF precipitation workbook.
 
 Reads only the saved EnviDat LWF API acquisition (metadata and yearly CSVs)
 and its hashed download manifest. It never reads the 2016 archive, PANGAEA
@@ -13,11 +13,13 @@ import csv
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import uuid
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
@@ -197,6 +199,7 @@ def process_year(root, model, item, days, totals):
 
 def assess_day(hours):
     values = []
+    hourly_values = [None] * 24
     chosen = Counter()
     missing = duplicate = ambiguous = invalid = 0
     off_hour = len(hours.get("off_hour", []))
@@ -217,14 +220,17 @@ def assess_day(hours):
             missing += 1
         elif state_a == "numeric":
             values.append(value_a)
+            hourly_values[hour] = value_a
             chosen[HOURLY[0]] += 1
         elif state_b == "numeric":
             values.append(value_b)
+            hourly_values[hour] = value_b
             chosen[HOURLY[1]] += 1
         else:
             invalid += 1
     complete = len(values) == 24 and not (duplicate or ambiguous or invalid or off_hour)
     return {"complete": complete, "amount": sum(values, Decimal(0)) if complete else None,
+            "hour_values": hourly_values,
             "partial": sum(values, Decimal(0)) if values else None, "valid_hours": len(values),
             "clock_rows": sum(len(v) for k, v in hours.items() if k != "off_hour"),
             "missing_hours": missing, "duplicate_rows": duplicate,
@@ -259,6 +265,23 @@ GRID_HEADERS = (
     "partial_valid_hour_amount_mm", "aggregation_status", "incomplete_day_details",
     "source_year_csv", "source_year_sha256", "assumed_time_basis", "scientific_qc_performed",
 )
+HOUR_HEADERS = (
+    "station_id", "station_name", "provider", "date_utc", "year", "month_number",
+    "day_of_month", *(f"H{h:02d}" for h in range(24)),
+    "valid_hourly_slots", "clock_hour_rows", "missing_hourly_slots",
+    "duplicate_hour_rows", "ambiguous_both_fields_hours", "invalid_or_negative_hours",
+    "off_hour_hourly_rows", "ordinary_hour_values", "multi_hour_values",
+    "computed_complete_day_total_mm", "partial_valid_hour_amount_mm",
+    "aggregation_status", "source_year_csv", "source_year_sha256",
+    "assumed_time_basis", "scientific_qc_performed",
+)
+HOUR_NUMERIC = {
+    "year", "month_number", "day_of_month", *(f"H{h:02d}" for h in range(24)),
+    "valid_hourly_slots", "clock_hour_rows", "missing_hourly_slots",
+    "duplicate_hour_rows", "ambiguous_both_fields_hours", "invalid_or_negative_hours",
+    "off_hour_hourly_rows", "ordinary_hour_values", "multi_hour_values",
+    "computed_complete_day_total_mm", "partial_valid_hour_amount_mm",
+}
 META_NUMERIC = {"source_year_files", "api_csv_rows", "hourly_clock_rows",
                 "complete_provisional_days", "complete_provisional_months"}
 GRID_NUMERIC = {"year", "month_number", "calendar_days", *(f"D{d:02}" for d in range(1, 32)),
@@ -269,7 +292,7 @@ GRID_NUMERIC = {"year", "month_number", "calendar_days", *(f"D{d:02}" for d in r
                 "sum_of_complete_days_mm", "partial_valid_hour_amount_mm"}
 
 
-def make_tables(root, run_id, report, coverage, metadata, entries):
+def make_tables(root, run_id, report, coverage, metadata, entries, hourly_sink):
     meta_rows, grid_rows = [], []
     manifest_hash = sha(report / "download_manifest.jsonl")
     all_counts = Counter()
@@ -304,6 +327,21 @@ def make_tables(root, run_id, report, coverage, metadata, entries):
             for day_num in range(1, n_days + 1):
                 d = date(year, month, day_num)
                 result = day_values.get(d) or assess_day({})
+                hourly_row = (
+                    model, name, "WSL / LWF EnviDat API", d.isoformat(), year, month,
+                    day_num, *(decimal_text(v) for v in result["hour_values"]),
+                    result["valid_hours"], result["clock_rows"], result["missing_hours"],
+                    result["duplicate_rows"], result["ambiguous_hours"], result["invalid_hours"],
+                    result["off_hour_rows"], result["fields"][HOURLY[0]],
+                    result["fields"][HOURLY[1]], decimal_text(result["amount"]),
+                    decimal_text(result["partial"]),
+                    "complete_UTC_source_label_provisional" if result["complete"] else "incomplete_or_ambiguous",
+                    source["relative_path"].replace("\\", "/"), source["sha256"],
+                    "UTC_source_date_one_hour_assumed", "false",
+                )
+                require(len(hourly_row) == len(HOUR_HEADERS), "Incorrect hourly grid width")
+                hourly_sink.write(json.dumps(hourly_row, ensure_ascii=False) + "\n")
+                all_counts["hourly_daily_grid_rows"] += 1
                 if result["clock_rows"]:
                     n_with_rows += 1
                 if result["complete"]:
@@ -375,7 +413,8 @@ def make_tables(root, run_id, report, coverage, metadata, entries):
         meta_rows.append(tuple(md[h] for h in META_HEADERS))
         print(f"{model}: {len(files)} API years; {completed_days} complete UTC days; "
               f"{completed_months} complete months", flush=True)
-    require(len(meta_rows) < 1048576 and len(grid_rows) < 1048576,
+    require(len(meta_rows) < 1048576 and len(grid_rows) < 1048576 and
+            all_counts["hourly_daily_grid_rows"] < 1048576,
             "Excel worksheet row limit exceeded")
     return meta_rows, grid_rows, all_counts
 
@@ -434,21 +473,73 @@ def sheet_xml(headers, rows, freeze_col, numeric_headers):
     return out.getvalue().encode("utf-8"), h.hexdigest()
 
 
-def write_workbook(path, meta_rows, grid_rows):
+def hourly_rows_from_jsonl(path):
+    with path.open("r", encoding="utf-8") as source:
+        for line in source:
+            yield json.loads(line)
+
+
+def stream_hourly_sheet(target, path, expected_rows):
+    """Write the large daily grid without holding its XML in memory."""
+    headers = HOUR_HEADERS
+    h = hashlib.sha256()
+    max_col = len(headers)
+    max_row = expected_rows + 1
+    prefix = ('<?xml version="1.0" encoding="utf-8"?>'
+              f'<worksheet xmlns="{NS}"><dimension ref="A1:{excel_col(max_col)}{max_row}"/>'
+              '<sheetViews><sheetView workbookViewId="0"><pane xSplit="7" ySplit="1" '
+              'topLeftCell="H2" activePane="bottomRight" state="frozen"/>'
+              '</sheetView></sheetViews><sheetFormatPr defaultRowHeight="16"/>'
+              f'<cols><col min="1" max="7" width="21" customWidth="1"/>'
+              f'<col min="8" max="{max_col}" width="15" customWidth="1"/></cols><sheetData>')
+    target.write(prefix.encode("utf-8"))
+    seen = 0
+    def write_row(row_number, values):
+        require(len(values) == max_col, f"Wrong number of cells at hourly row {row_number}")
+        row = io.StringIO()
+        row.write(f'<row r="{row_number}"' + (' s="3" customFormat="1"' if row_number == 1 else '') + '>')
+        for c, value in enumerate(values, 1):
+            if row_number == 1:
+                address = excel_col(c) + "1"
+                data = str(value)
+                row.write(f'<c r="{address}" t="inlineStr" s="3"><is><t>{escape(data)}</t></is></c>')
+                h.update(json.dumps((address, "s", data), ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
+            else:
+                append_cell(row, c, row_number, value, h, headers[c - 1] in HOUR_NUMERIC)
+        row.write('</row>')
+        target.write(row.getvalue().encode("utf-8"))
+    write_row(1, headers)
+    for seen, values in enumerate(hourly_rows_from_jsonl(path), 1):
+        require(seen <= expected_rows, "Hourly source row count exceeded prepared count")
+        write_row(seen + 1, values)
+    require(seen == expected_rows, "Hourly source row count changed during write")
+    target.write((f'</sheetData><autoFilter ref="A1:{excel_col(max_col)}{max_row}"/>'
+                  '</worksheet>').encode("utf-8"))
+    return h.hexdigest()
+
+
+def write_workbook(path, meta_rows, hourly_jsonl, hourly_count, grid_rows):
     sheets = (("Station_metadata", META_HEADERS, meta_rows, 4, META_NUMERIC),
+              ("Hourly_daily_grid", HOUR_HEADERS, hourly_jsonl, 8, HOUR_NUMERIC),
               ("Daily_month_grid", GRID_HEADERS, grid_rows, 9, GRID_NUMERIC))
     verification = {}
     tmp = path.with_suffix(".xlsx.part")
     with ZipFile(tmp, "w", compression=ZIP_DEFLATED, compresslevel=6) as z:
-        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
+        z.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="utf-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>')
         z.writestr("_rels/.rels", '<?xml version="1.0" encoding="utf-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
-        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="utf-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Station_metadata" sheetId="1" r:id="rId1"/><sheet name="Daily_month_grid" sheetId="2" r:id="rId2"/></sheets></workbook>')
-        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="utf-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", '<?xml version="1.0" encoding="utf-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Station_metadata" sheetId="1" r:id="rId1"/><sheet name="Hourly_daily_grid" sheetId="2" r:id="rId2"/><sheet name="Daily_month_grid" sheetId="3" r:id="rId3"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0" encoding="utf-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>')
         z.writestr("xl/styles.xml", '<?xml version="1.0" encoding="utf-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="10"/><name val="Aptos"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="10"/><name val="Aptos"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF24466B"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFill="1" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>')
         for index, (name, headers, rows, freeze, numeric_headers) in enumerate(sheets, 1):
-            content, digest = sheet_xml(headers, rows, freeze, numeric_headers)
-            z.writestr(f"xl/worksheets/sheet{index}.xml", content)
-            verification[name] = {"rows_including_header": len(rows) + 1,
+            if index == 2:
+                with z.open(f"xl/worksheets/sheet{index}.xml", "w", force_zip64=True) as target:
+                    digest = stream_hourly_sheet(target, hourly_jsonl, hourly_count)
+                row_count = hourly_count
+            else:
+                content, digest = sheet_xml(headers, rows, freeze, numeric_headers)
+                z.writestr(f"xl/worksheets/sheet{index}.xml", content)
+                row_count = len(rows)
+            verification[name] = {"rows_including_header": row_count + 1,
                                   "populated_cells_sha256": digest}
     with ZipFile(tmp) as z:
         require(z.testzip() is None, "Saved XLSX ZIP CRC failed")
@@ -456,7 +547,11 @@ def write_workbook(path, meta_rows, grid_rows):
             h = hashlib.sha256()
             count = 0
             with z.open(f"xl/worksheets/sheet{index}.xml") as xml:
-                for event, element in ET.iterparse(xml, events=("end",)):
+                events = ET.iterparse(xml, events=("start", "end"))
+                _, root_element = next(events)
+                for event, element in events:
+                    if event != "end":
+                        continue
                     if element.tag == f"{{{NS}}}c":
                         address = element.attrib["r"]
                         if element.attrib.get("t") == "inlineStr":
@@ -470,7 +565,9 @@ def write_workbook(path, meta_rows, grid_rows):
                     elif element.tag == f"{{{NS}}}row":
                         count += 1
                         element.clear()
-            require(count == len(rows) + 1 and h.hexdigest() == verification[name]["populated_cells_sha256"],
+                        root_element.clear()
+            require(count == verification[name]["rows_including_header"] and
+                    h.hexdigest() == verification[name]["populated_cells_sha256"],
                     f"Saved XLSX cell mismatch in {name}")
     os.replace(tmp, path)
     return verification
@@ -487,16 +584,22 @@ def main(argv=None):
     root = args.root.resolve()
     report, raw, summary, coverage, metadata, entries = load_acquisition(
         root, args.run_id, args.expected_stations)
-    meta_rows, grid_rows, counts = make_tables(root, args.run_id, report, coverage, metadata, entries)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_") + uuid.uuid4().hex[:8]
-    output = root / "working" / "wsl_lwf" / "api_only_excel" / args.run_id / stamp
-    output.mkdir(parents=True, exist_ok=False)
-    workbook = output / MAIN_FILE
-    verification = write_workbook(workbook, meta_rows, grid_rows)
+    with tempfile.TemporaryDirectory(prefix="wsl_api_hourly_") as temporary:
+        hourly_jsonl = Path(temporary) / "hourly_daily_rows.jsonl"
+        with hourly_jsonl.open("w", encoding="utf-8") as hourly_sink:
+            meta_rows, grid_rows, counts = make_tables(
+                root, args.run_id, report, coverage, metadata, entries, hourly_sink)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_") + uuid.uuid4().hex[:8]
+        output = root / "working" / "wsl_lwf" / "api_only_excel" / args.run_id / stamp
+        output.mkdir(parents=True, exist_ok=False)
+        workbook = output / MAIN_FILE
+        verification = write_workbook(
+            workbook, meta_rows, hourly_jsonl, counts["hourly_daily_grid_rows"], grid_rows)
     result = {
         "status": "completed_api_only_provisional_source_label_sums",
         "api_run_id": args.run_id, "input_scope": "saved_api_metadata_and_yearly_csv_only",
         "station_count": len(meta_rows), "source_year_files": len(entries),
+        "hourly_daily_grid_rows": counts["hourly_daily_grid_rows"],
         "monthly_grid_rows": len(grid_rows), "counts": dict(counts),
         "source_monthly_totals_available": False,
         "longitude_latitude_elevation_in_API": False,
@@ -519,7 +622,8 @@ def main(argv=None):
     temporary = pointer.with_suffix(".json.part")
     temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, pointer)
-    print(f"Completed API-only export: {len(meta_rows)} models, {len(grid_rows)} months: {workbook}")
+    print(f"Completed API-only export: {len(meta_rows)} models, "
+          f"{counts['hourly_daily_grid_rows']} days, {len(grid_rows)} months: {workbook}")
     return 0
 
 

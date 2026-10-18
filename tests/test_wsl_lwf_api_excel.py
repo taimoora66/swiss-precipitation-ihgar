@@ -101,11 +101,13 @@ class ApiOnlyExportTests(unittest.TestCase):
                                        "--expected-stations", "1"]), 0)
             result = json.loads((root / "working/wsl_lwf/api_only_excel/latest.json").read_text())
             self.assertEqual(result["station_count"], 1)
+            self.assertEqual(result["hourly_daily_grid_rows"], 60)
             self.assertEqual(result["counts"]["complete_months"], 1)
             self.assertEqual(result["counts"]["off_hour_hourly_field_rows"], 1)
             with ZipFile(result["workbook"]) as z:
                 metadata = cells(z, 1)
-                grid = cells(z, 2)
+                hourly = cells(z, 2)
+                grid = cells(z, 3)
             meta = dict(zip(api.META_HEADERS, [metadata[1].get(api.excel_col(i)) for i in range(1, len(api.META_HEADERS) + 1)]))
             self.assertIsNone(meta["elevation_m"])
             self.assertEqual(meta["instrument_status"], "not_supplied_by_acquired_API")
@@ -116,6 +118,16 @@ class ApiOnlyExportTests(unittest.TestCase):
             self.assertIsNone(january.get(headers["source_monthly_total_mm"]))
             self.assertIsNone(february.get(headers["D02"]))
             self.assertIsNone(february.get(headers["D03"]))
+            hour_columns = {hourly[0].get(api.excel_col(i)): api.excel_col(i)
+                            for i in range(1, len(api.HOUR_HEADERS) + 1)}
+            first_day, ambiguous_day, offhour_day = hourly[1], hourly[33], hourly[34]
+            self.assertEqual(first_day[hour_columns["H00"]], "1.0")
+            self.assertEqual(first_day[hour_columns["H23"]], "1.0")
+            self.assertEqual(first_day[hour_columns["computed_complete_day_total_mm"]], "24.0")
+            self.assertIsNone(ambiguous_day.get(hour_columns["H03"]))
+            self.assertIsNone(ambiguous_day.get(hour_columns["computed_complete_day_total_mm"]))
+            self.assertEqual(offhour_day[hour_columns["H11"]], "1.0")
+            self.assertIsNone(offhour_day.get(hour_columns["computed_complete_day_total_mm"]))
 
     def test_mutated_api_year_blocks_export(self):
         with tempfile.TemporaryDirectory() as temp:
